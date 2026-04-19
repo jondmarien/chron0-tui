@@ -8,7 +8,7 @@ Type=simple
 User=tui
 Group=tui
 WorkingDirectory=/opt/chron0-tui
-ExecStart=/home/tui/.bun/bin/bun dist/index.js
+ExecStart=/home/tui/.bun/bin/bun src/index.ts
 Environment=NODE_ENV=production
 Environment=HOST=0.0.0.0
 Environment=PORT=2222

@@ -76,7 +76,8 @@ ssh -p 2200 root@ssh.chron0.tech 'journalctl -u chron0-tui -f'
 
 ## 6. Updating content
 
-Content is baked into the build. To ship an update:
+Bun runs TypeScript directly, so there's no `tsc` build step in production
+(the systemd unit execs `bun src/index.ts`). To ship an update:
 
 ```sh
 ssh -p 2200 root@ssh.chron0.tech
@@ -84,7 +85,6 @@ cd /opt/chron0-tui
 git pull
 sudo -u tui /home/tui/.bun/bin/bun install
 sudo -u tui /home/tui/.bun/bin/bun run gen-assets
-sudo -u tui /home/tui/.bun/bin/bun run build
 systemctl restart chron0-tui
 ```
 

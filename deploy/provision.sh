@@ -71,8 +71,10 @@ else
 fi
 chown -R "${TUI_USER}:${TUI_USER}" "${APP_DIR}"
 
-log "installing deps + building + generating assets"
-sudo -u "${TUI_USER}" bash -lc "cd '${APP_DIR}' && '${BUN_BIN}' install && '${BUN_BIN}' run gen-assets && '${BUN_BIN}' run build"
+log "installing deps + generating assets"
+# Bun runs TS directly; no tsc step needed. Skipping `run build` avoids the
+# stale-dist/ class of bug where new src/ + old dist/ ship the wrong code.
+sudo -u "${TUI_USER}" bash -lc "cd '${APP_DIR}' && '${BUN_BIN}' install && '${BUN_BIN}' run gen-assets"
 
 # ── 4. Host key ───────────────────────────────────────────────────────────
 HOST_KEY="/home/${TUI_USER}/.ssh/host_rsa"
