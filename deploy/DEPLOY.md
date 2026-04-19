@@ -45,7 +45,7 @@ On the droplet:
 
 ```sh
 git clone https://github.com/jondmarien/chron0-tui /opt/chron0-tui
-bash /opt/chron0-tui/server/deploy/provision.sh
+bash /opt/chron0-tui/deploy/provision.sh
 ```
 
 The script is idempotent and:
@@ -82,9 +82,9 @@ Content is baked into the build. To ship an update:
 ssh -p 2200 root@ssh.chron0.tech
 cd /opt/chron0-tui
 git pull
-sudo -u tui /home/tui/.bun/bin/bun --cwd server install
-sudo -u tui /home/tui/.bun/bin/bun --cwd server run gen-assets
-sudo -u tui /home/tui/.bun/bin/bun --cwd server run build
+sudo -u tui /home/tui/.bun/bin/bun install
+sudo -u tui /home/tui/.bun/bin/bun run gen-assets
+sudo -u tui /home/tui/.bun/bin/bun run build
 systemctl restart chron0-tui
 ```
 

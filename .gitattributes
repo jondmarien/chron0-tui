@@ -1,0 +1,18 @@
+# Always LF for anything interpreted on a *nix host, even when edited/committed
+# on Windows. Without this, CRLF endings break `bash set -euo pipefail`, shebangs,
+# systemd units, and similar.
+*.sh        text eol=lf
+*.service   text eol=lf
+*.mjs       text eol=lf
+*.js        text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.json      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+Makefile    text eol=lf
+
+# Binary-safe
+*.png       binary
+*.jpg       binary
+*.jpeg      binary

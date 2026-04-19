@@ -36,10 +36,17 @@ die()  { printf '\e[1;31m[error]\e[0m %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "run as root"
 
 # ── 1. Base packages ──────────────────────────────────────────────────────
+# Installed in small groups so a single package failure is obvious, and with
+# --no-install-recommends to avoid the typical Ubuntu 24.04 `iptables-persistent`
+# vs `nftables` held-packages breakage.
 log "updating apt and installing base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl git unzip ca-certificates ufw iptables-persistent
+apt-get install -y --no-install-recommends curl git unzip ca-certificates
+apt-get install -y --no-install-recommends ufw
+# iptables-persistent pulls netfilter-persistent; on 24.04 we install both
+# explicitly and without recommends to avoid conflicts.
+apt-get install -y --no-install-recommends netfilter-persistent iptables-persistent
 
 # ── 2. Bun (as the tui user — official install script) ────────────────────
 log "ensuring user '${TUI_USER}' exists"
@@ -64,7 +71,7 @@ fi
 chown -R "${TUI_USER}:${TUI_USER}" "${APP_DIR}"
 
 log "installing deps + building + generating assets"
-sudo -u "${TUI_USER}" bash -lc "cd '${APP_DIR}/server' && '${BUN_BIN}' install && '${BUN_BIN}' run gen-assets && '${BUN_BIN}' run build"
+sudo -u "${TUI_USER}" bash -lc "cd '${APP_DIR}' && '${BUN_BIN}' install && '${BUN_BIN}' run gen-assets && '${BUN_BIN}' run build"
 
 # ── 4. Host key ───────────────────────────────────────────────────────────
 HOST_KEY="/home/${TUI_USER}/.ssh/host_rsa"
@@ -111,7 +118,7 @@ netfilter-persistent save
 
 # ── 7. Systemd unit ──────────────────────────────────────────────────────
 log "installing systemd unit"
-install -m 0644 "${APP_DIR}/server/deploy/chron0-tui.service" /etc/systemd/system/chron0-tui.service
+install -m 0644 "${APP_DIR}/deploy/chron0-tui.service" /etc/systemd/system/chron0-tui.service
 systemctl daemon-reload
 systemctl enable --now chron0-tui
 

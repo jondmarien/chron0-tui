@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=tui
 Group=tui
-WorkingDirectory=/opt/chron0-tui/server
+WorkingDirectory=/opt/chron0-tui
 ExecStart=/home/tui/.bun/bin/bun dist/index.js
 Environment=NODE_ENV=production
 Environment=HOST=0.0.0.0
