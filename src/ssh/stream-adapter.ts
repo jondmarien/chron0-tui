@@ -1,138 +1,179 @@
-import type { ServerChannel } from 'ssh2';
-import type { Writable, Readable } from 'node:stream';
+import type { ServerChannel } from "ssh2";
+import { PassThrough, Transform, type Writable } from "node:stream";
 
-export interface TTYStdout extends Writable {
+export interface TTYStdout extends Transform {
   columns: number;
   rows: number;
   isTTY: true;
-  getColorDepth?: () => number;
-  hasColors?: (...args: unknown[]) => boolean;
+  getColorDepth: () => number;
+  hasColors: (...args: unknown[]) => boolean;
 }
 
-export interface TTYStdin extends Readable {
+export interface TTYStdin extends PassThrough {
   isTTY: true;
-  setRawMode: (raw: boolean) => void;
-  setEncoding: (encoding: BufferEncoding) => this;
+  setRawMode: (raw: boolean) => TTYStdin;
   ref: () => void;
   unref: () => void;
 }
 
 /**
- * Translate LF → CRLF on bytes written to the channel.
+ * Translate LF → CRLF on every byte that flows through.
  *
- * On a real terminal, the pty master's line discipline applies the ONLCR
- * flag, converting `\n` to `\r\n` automatically. Over a raw ssh2 channel
- * there is no pty master — Ink's output arrives as `\n`-separated lines
- * and the client's terminal renders each line below the previous one at
- * the same column (the "staircase" effect).
+ * On a real terminal the pty master's line discipline applies the ONLCR flag
+ * and converts `\n` to `\r\n` automatically. Over a raw ssh2 channel there is
+ * no pty master — Ink's output arrives as `\n`-separated lines and the
+ * client's terminal renders each line below the previous one at the same
+ * column (the "staircase" effect). We translate at the boundary between
+ * Ink and the channel so the wire format is always `\r\n`.
  *
- * We wrap the channel's write to prepend `\r` before any lone `\n`. We
- * preserve existing `\r\n` sequences to avoid emitting `\r\r\n`, and we
- * remember whether the last byte of the previous chunk was `\r` so the
- * translation is correct across chunk boundaries.
+ * `lastWasCR` is preserved across chunks so we don't insert a stray `\r`
+ * in front of an `\n` that the previous chunk already finished with `\r`.
  */
-function installCrlfTranslation(channel: ServerChannel): void {
-  const anyCh = channel as unknown as { write: ServerChannel['write']; __crlfPatched?: boolean };
-  if (anyCh.__crlfPatched) return;
-  anyCh.__crlfPatched = true;
+class CRLFTransform extends Transform {
+  private lastWasCR = false;
 
-  const origWrite = channel.write.bind(channel);
-  let lastWasCR = false;
+  override _transform(
+    chunk: unknown,
+    encoding: BufferEncoding | "buffer",
+    callback: (err?: Error | null, data?: Buffer) => void,
+  ): void {
+    let buf: Buffer;
+    if (Buffer.isBuffer(chunk)) {
+      buf = chunk;
+    } else if (typeof chunk === "string") {
+      const enc: BufferEncoding = encoding === "buffer" ? "utf8" : encoding;
+      buf = Buffer.from(chunk, enc);
+    } else if (chunk instanceof Uint8Array) {
+      buf = Buffer.from(chunk);
+    } else {
+      callback();
+      return;
+    }
 
-  const translate = (buf: Buffer): Buffer => {
     const out: number[] = [];
     for (let i = 0; i < buf.length; i++) {
       const b = buf[i]!;
       if (b === 0x0a /* \n */) {
-        const prev = i === 0 ? (lastWasCR ? 0x0d : 0) : buf[i - 1];
+        const prev = i === 0 ? (this.lastWasCR ? 0x0d : 0) : buf[i - 1];
         if (prev !== 0x0d) out.push(0x0d);
         out.push(0x0a);
       } else {
         out.push(b);
       }
     }
-    lastWasCR = buf.length > 0 && buf[buf.length - 1] === 0x0d;
-    return Buffer.from(out);
-  };
-
-  (channel as any).write = function patchedWrite(
-    chunk: unknown,
-    encoding?: BufferEncoding | ((err?: Error | null) => void),
-    cb?: (err?: Error | null) => void
-  ): boolean {
-    let buf: Buffer;
-    if (Buffer.isBuffer(chunk)) {
-      buf = chunk;
-    } else if (typeof chunk === 'string') {
-      const enc: BufferEncoding = typeof encoding === 'string' ? encoding : 'utf8';
-      buf = Buffer.from(chunk, enc);
-    } else if (chunk instanceof Uint8Array) {
-      buf = Buffer.from(chunk);
-    } else {
-      // Unknown chunk — pass through untouched.
-      return origWrite(chunk as Buffer, encoding as BufferEncoding, cb as any);
-    }
-    const cbArg = typeof encoding === 'function' ? encoding : cb;
-    return origWrite(translate(buf), cbArg);
-  };
+    this.lastWasCR = buf.length > 0 && buf[buf.length - 1] === 0x0d;
+    callback(null, Buffer.from(out));
+  }
 }
 
 /**
- * Wrap an ssh2 ServerChannel so Ink treats it like a real TTY. Ink reads
- * `.columns` / `.rows` off stdout, listens for `resize`, calls
- * `setRawMode` / `setEncoding` / `ref` / `unref` on stdin, and writes
- * `\n`-terminated lines assuming a pty driver will translate to `\r\n`.
- * A bare ssh2 channel has none of these, so we bolt them on.
+ * Force-install a method as an own data property. Direct assignment can
+ * silently fail under Bun when a prototype defines the same name as a
+ * non-writable getter (see oven-sh/bun#16718, #22372). `defineProperty`
+ * with `configurable: true, writable: true` always wins.
+ */
+function installMethod<T extends object>(
+  target: T,
+  name: string,
+  fn: (...args: any[]) => any,
+): void {
+  Object.defineProperty(target, name, {
+    value: fn,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
+function installValue<T extends object>(
+  target: T,
+  name: string,
+  value: unknown,
+): void {
+  Object.defineProperty(target, name, {
+    value,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
+/**
+ * Wrap an ssh2 ServerChannel so Ink can treat it like a real TTY.
+ *
+ * Strategy: never mutate the channel itself. Build dedicated wrapper
+ * streams whose properties we fully control, then pipe bytes between
+ * them and the channel. This is robust under both Node and Bun, where
+ * `Duplex` / socket prototypes can interfere with property assignment
+ * on the channel object.
+ *
+ *   client → channel → stdin (PassThrough) → Ink useInput
+ *   Ink render → stdout (CRLFTransform) → channel → client
  */
 export function adaptChannel(
   channel: ServerChannel,
   initialCols: number,
-  initialRows: number
+  initialRows: number,
 ): { stdin: TTYStdin; stdout: TTYStdout; stderr: Writable } {
-  // Translate LF → CRLF on output so Ink's newline-separated frames render
-  // correctly on the client terminal (no pty master here to do it for us).
-  installCrlfTranslation(channel);
+  // ── stdin ───────────────────────────────────────────────────────
+  const stdin = new PassThrough() as TTYStdin;
+  installValue(stdin, "isTTY", true);
+  installMethod(stdin, "setRawMode", function setRawMode(this: TTYStdin) {
+    // ssh2 already delivers raw keystrokes; no kernel tty to toggle.
+    return this;
+  });
+  installMethod(stdin, "ref", () => {
+    /* SSH server keeps the event loop alive; nothing to ref. */
+  });
+  installMethod(stdin, "unref", () => {
+    /* paired noop with ref(). */
+  });
 
-  // Decorate stdout-side.
-  const stdout = channel as unknown as TTYStdout;
-  stdout.columns = Math.max(1, initialCols || 80);
-  stdout.rows = Math.max(1, initialRows || 24);
-  stdout.isTTY = true;
-  if (typeof stdout.getColorDepth !== 'function') {
-    stdout.getColorDepth = () => 24; // 24-bit truecolor — terminals negotiate down if needed
-  }
-  if (typeof stdout.hasColors !== 'function') {
-    stdout.hasColors = () => true;
-  }
+  channel.pipe(stdin);
 
-  // Decorate stdin-side. The ssh2 channel is bidirectional, so it's the same
-  // object, but we expose a different type so Ink's input code is happy.
-  const stdin = channel as unknown as TTYStdin;
-  stdin.isTTY = true;
-  if (typeof stdin.setRawMode !== 'function') {
-    stdin.setRawMode = () => {
-      /* ssh2 already gives us raw keystrokes; nothing to toggle */
-    };
-  }
-  // Ink calls .ref() / .unref() on stdin when toggling raw mode. On Node
-  // these come from the underlying net.Socket, but Bun's Duplex streams
-  // don't expose them and an ssh2 channel never does. Noops are safe: the
-  // SSH server itself keeps the event loop alive.
-  if (typeof stdin.ref !== 'function') {
-    stdin.ref = () => { /* noop */ };
-  }
-  if (typeof stdin.unref !== 'function') {
-    stdin.unref = () => { /* noop */ };
-  }
-  // Ink calls .setEncoding('utf8'); ssh2 channels are duplex streams which
-  // already support setEncoding, so this is usually a no-op — keep it safe.
-  if (typeof stdin.setEncoding !== 'function') {
-    stdin.setEncoding = function (this: TTYStdin) {
-      return this;
-    };
-  }
+  // ── stdout ──────────────────────────────────────────────────────
+  let cols = Math.max(1, initialCols || 80);
+  let rows = Math.max(1, initialRows || 24);
 
-  const stderr = channel.stderr as unknown as Writable;
+  const stdout = new CRLFTransform() as unknown as TTYStdout;
+  Object.defineProperty(stdout, "isTTY", {
+    value: true,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  Object.defineProperty(stdout, "columns", {
+    get: () => cols,
+    set: (v: number) => {
+      const n = Number(v);
+      cols = Math.max(1, Number.isFinite(n) && n > 0 ? Math.floor(n) : 80);
+    },
+    configurable: true,
+    enumerable: true,
+  });
+  Object.defineProperty(stdout, "rows", {
+    get: () => rows,
+    set: (v: number) => {
+      const n = Number(v);
+      rows = Math.max(1, Number.isFinite(n) && n > 0 ? Math.floor(n) : 24);
+    },
+    configurable: true,
+    enumerable: true,
+  });
+  installMethod(stdout, "getColorDepth", () => 24);
+  installMethod(stdout, "hasColors", () => true);
+
+  // Don't propagate the transform's `end` to the channel — we close the
+  // channel explicitly during cleanup.
+  stdout.pipe(channel as unknown as Writable, { end: false });
+
+  // ── stderr ──────────────────────────────────────────────────────
+  // ssh2 exposes a writable stderr sub-stream. CRLF doesn't matter much
+  // here (we mostly write short status lines) but keep a transform for
+  // consistency with stdout.
+  const stderrTransform = new CRLFTransform();
+  stderrTransform.pipe(channel.stderr as unknown as Writable, { end: false });
+  const stderr = stderrTransform as unknown as Writable;
 
   return { stdin, stdout, stderr };
 }
