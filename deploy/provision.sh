@@ -42,8 +42,11 @@ die()  { printf '\e[1;31m[error]\e[0m %s\n' "$*" >&2; exit 1; }
 log "updating apt and installing base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y --no-install-recommends curl git unzip ca-certificates
-apt-get install -y --no-install-recommends ufw
+apt-get install -y --no-install-recommends curl git unzip ca-certificates openssh-server
+apt-get install -y --no-install-recommends ufw || {
+  warn "ufw install failed, retrying with default recommends"
+  apt-get install -y ufw
+}
 # iptables-persistent pulls netfilter-persistent; on 24.04 we install both
 # explicitly and without recommends to avoid conflicts.
 apt-get install -y --no-install-recommends netfilter-persistent iptables-persistent
@@ -83,16 +86,34 @@ if [[ ! -f "${HOST_KEY}" ]]; then
 fi
 chmod 600 "${HOST_KEY}"
 
-# ── 5. Move admin sshd to ${ADMIN_SSH_PORT} ───────────────────────────────
+# ── 5. Move admin sshd to ${ADMIN_SSH_PORT} ───────────────────────
 log "relocating admin sshd from 22 → ${ADMIN_SSH_PORT}"
+
+# Ubuntu 24.04 uses systemd socket activation by default: ssh.socket listens on
+# port 22 and hands off to sshd, which ignores the `Port` directive in
+# sshd_config. We must disable the socket and run sshd directly.
+if systemctl list-unit-files ssh.socket &>/dev/null; then
+  log "  disabling ssh.socket (socket activation overrides sshd_config Port)"
+  systemctl disable --now ssh.socket 2>/dev/null || true
+fi
+systemctl enable ssh 2>/dev/null || true
+
 SSHD="/etc/ssh/sshd_config"
 if ! grep -Eq "^Port ${ADMIN_SSH_PORT}$" "${SSHD}"; then
   cp -a "${SSHD}" "${SSHD}.bak.$(date +%s)"
   # Remove any existing Port directive(s), then add ours at the top.
   sed -i -E 's/^\s*#?\s*Port\s+.*$//' "${SSHD}"
   printf '\n# chron0-tui: admin sshd relocated so port 22 can host the TUI\nPort %s\n' "${ADMIN_SSH_PORT}" >> "${SSHD}"
-  systemctl reload ssh
 fi
+
+# Hard restart (reload isn't enough after socket-activation changes).
+systemctl restart ssh
+
+# Verify sshd is actually bound to the new port before we let the user proceed.
+if ! ss -tlnp 2>/dev/null | grep -q ":${ADMIN_SSH_PORT}\b"; then
+  die "sshd is NOT listening on ${ADMIN_SSH_PORT} after restart. Check: systemctl status ssh ; journalctl -u ssh -n 50"
+fi
+log "  sshd confirmed listening on ${ADMIN_SSH_PORT}"
 
 warn "Admin sshd is now on port ${ADMIN_SSH_PORT}."
 warn "In a SECOND terminal, verify now:"
