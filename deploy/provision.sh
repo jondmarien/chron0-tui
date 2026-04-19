@@ -43,12 +43,10 @@ log "updating apt and installing base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends curl git unzip ca-certificates openssh-server
-apt-get install -y --no-install-recommends ufw || {
-  warn "ufw install failed, retrying with default recommends"
-  apt-get install -y ufw
-}
-# iptables-persistent pulls netfilter-persistent; on 24.04 we install both
-# explicitly and without recommends to avoid conflicts.
+# Note: we deliberately do NOT install `ufw` here — on Ubuntu 24.04 the
+# legacy `iptables-persistent` package conflicts with `ufw` (nftables
+# backend) and apt silently removes ufw when you install the former.
+# We manage the firewall directly with iptables instead.
 apt-get install -y --no-install-recommends netfilter-persistent iptables-persistent
 
 # ── 2. Bun (as the tui user — official install script) ────────────────────
@@ -120,12 +118,13 @@ warn "In a SECOND terminal, verify now:"
 warn "  ssh -p ${ADMIN_SSH_PORT} root@$(hostname -I | awk '{print $1}')"
 read -rp "Press ENTER once that works. (Ctrl-C aborts; old config is backed up.) "
 
-# ── 6. Firewall + port redirect ───────────────────────────────────────────
-log "configuring UFW"
-ufw --force enable
-ufw allow "${ADMIN_SSH_PORT}/tcp"
-ufw allow 22/tcp
-# 2222 is for internal use only — only redirected traffic reaches it.
+# ── 6. Firewall + port redirect ─────────────────────────────────
+# DO droplets start with a wide-open iptables INPUT policy (ACCEPT, no rules),
+# so the admin port (${ADMIN_SSH_PORT}) and the public redirect target (22)
+# are already reachable. Ports 2222 (app) reaches only via the PREROUTING
+# redirect below. If you later harden INPUT, remember to allow these:
+#   iptables -A INPUT -p tcp --dport ${ADMIN_SSH_PORT} -j ACCEPT
+#   iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 
 log "installing iptables 22 → ${APP_PORT} redirect"
 if ! iptables -t nat -C PREROUTING -p tcp --dport 22 -j REDIRECT --to-port "${APP_PORT}" 2>/dev/null; then
