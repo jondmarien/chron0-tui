@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+# Generated assets (runtime reads these; regenerate via `npm run gen-assets`)
+assets/portrait.txt
+assets/banner.txt
+# SSH host key lives outside the repo in production; if present in dev, do not commit
+*.host_rsa
+*.host_rsa.pub
+host_rsa
+host_rsa.pub
